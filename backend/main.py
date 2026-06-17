@@ -85,7 +85,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-FRONTEND_DIR = Path(__file__).parent.parent / "frontend"
+FRONTEND_DIR = Path(__file__).resolve().parent / "frontend"
 if FRONTEND_DIR.exists():
     app.mount("/static", StaticFiles(directory=str(FRONTEND_DIR)), name="static")
 
@@ -95,7 +95,7 @@ ANTHROPIC_ENDPOINT = "https://api.anthropic.com/v1/messages"
 ANTHROPIC_VERSION  = "2023-06-01"
 
 # Tool schema — loaded once from agents.json at startup
-_AGENTS_JSON = Path(__file__).parent.parent / "agents" / "agents.json"
+_AGENTS_JSON = Path(__file__).resolve().parent / "agents" / "agents.json"
 with open(_AGENTS_JSON) as _f:
     _AGENT_DEF = json.load(_f)
 
