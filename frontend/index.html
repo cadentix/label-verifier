@@ -340,11 +340,11 @@
   try {
     const d = await fetch('/health').then(r => r.json());
     const el = document.getElementById('apiStatus');
-    if (d.api_key_set && d.agent_set) {
+    if (d.api_key_set) {
       el.textContent = 'Ready';
       el.classList.add('ok');
     } else {
-      const missing = [!d.api_key_set && 'API key', !d.agent_set && 'Agent ID'].filter(Boolean);
+      const missing = !d.api_key_set ? ['API key'] : [];
       el.textContent = `Missing: ${missing.join(', ')}`;
     }
   } catch {
@@ -517,9 +517,8 @@ async function runVerification() {
 
 // ── Card helpers ──────────────────────────────────────────────────────────────
 const STAGE_LABELS = {
-  extracting: 'Extracting form data…',
-  imaging:    'Extracting label images…',
-  verifying:  'Sending to agent…',
+  imaging:    'Extracting label image…',
+  verifying:  'Sending PDF and label to Claude…',
   complete:   'Done',
 };
 
@@ -596,10 +595,9 @@ const FIELD_LABELS = {
 };
 
 function buildBody(d) {
-  const result   = d.result   || {};
-  const fields   = result.fields || {};
-  const issues   = result.additional_issues || [];
-  const formData = d.form_data || {};
+  const result = d.result || {};
+  const fields = result.fields || {};
+  const issues = result.additional_issues || [];
 
   let rows = '';
   for (const [key, label] of Object.entries(FIELD_LABELS)) {
@@ -609,7 +607,7 @@ function buildBody(d) {
       <td class="field-label">${label}</td>
       <td><span class="tag ${status}">${status.replace(/_/g,' ')}</span></td>
       <td><span class="val-label">On label</span>${esc(f.label_value || '—')}</td>
-      <td><span class="val-label">Application</span>${esc(f.application_value || formData[key] || '—')}</td>
+      <td><span class="val-label">Application</span>${esc(f.application_value || '—')}</td>
       <td style="color:var(--ink-mid);font-size:.78rem">${esc(f.finding || '')}</td>
     </tr>`;
   }
@@ -618,9 +616,7 @@ function buildBody(d) {
     ? `<div class="issues-list"><h4>Additional Issues</h4>${issues.map(i => `<div>• ${esc(i)}</div>`).join('')}</div>`
     : '';
 
-  const metaHtml = Object.keys(formData).length
-    ? `<p class="result-meta">Fields extracted: ${Object.keys(formData).join(', ')} · Images: ${d.images_found}</p>`
-    : '';
+  const metaHtml = `<p class="result-meta">Label images extracted: ${d.images_found}</p>`;
 
   return `<table class="fields-table">
     <thead><tr><th>Field</th><th>Status</th><th>Label Value</th><th>Application Value</th><th>Finding</th></tr></thead>

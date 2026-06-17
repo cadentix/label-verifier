@@ -9,7 +9,6 @@ import io
 import json
 import logging
 import os
-import re
 import sys
 import uuid
 from collections import deque
@@ -133,108 +132,6 @@ VERIFICATION_SYSTEM = _AGENT_DEF.get("system", "")
 # ── PDF extraction ─────────────────────────────────────────────────────────────
 
 
-def is_flattened_or_unfillable(pdf_bytes: bytes) -> bool:
-    """
-    True if the PDF has no live AcroForm widget fields anywhere.
-    This covers two cases we can't distinguish from structure alone:
-    a form that was flattened (fields baked into static content), or
-    a PDF that was never a fillable form to begin with. Either way,
-    regex text extraction is the only local option — Claude reading
-    the full PDF directly is more reliable than guessing.
-    """
-    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-    for page in doc:
-        if list(page.widgets()):
-            doc.close()
-            return False
-    doc.close()
-    return True
-
-
-def extract_form_fields(pdf_bytes: bytes) -> dict:
-    """
-    Extract TTB COLA form field values from a PDF using fitz (PyMuPDF) only.
-    Tries AcroForm widget fields first; falls back to raw text extraction.
-    """
-    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-
-    # --- AcroForm fields (filled/interactive PDFs) ---
-    fields: dict[str, str] = {}
-    for page in doc:
-        for widget in page.widgets():
-            if widget.field_name and widget.field_value:
-                fields[widget.field_name.strip()] = str(widget.field_value).strip()
-
-    if fields:
-        logger.debug(f"AcroForm fields found: {list(fields.keys())}")
-        doc.close()
-        return _map_form_fields(fields)
-
-    # --- Plain text fallback ---
-    logger.debug("No AcroForm fields — falling back to text extraction")
-    full_text = "\n".join(page.get_text() for page in doc)
-    doc.close()
-    return _extract_fields_from_text(full_text)
-
-
-def _map_form_fields(raw: dict) -> dict:
-    """Map raw AcroForm field names to our canonical field names."""
-    # TTB Form 5100.31 field name patterns (approximate — vary by PDF version)
-    mapping = {
-        "brand_name": ["BrandName", "Brand_Name", "brand name", "BND_NM"],
-        "class_type": ["ClassType", "Class_Type", "TYPE", "ClassTypeDesig"],
-        "alcohol_content": ["AlcoholContent", "ABV", "AlcVol", "ALCOHOL"],
-        "net_contents": ["NetContents", "Net_Contents", "NET_CONT", "Volume"],
-        "bottler_name": ["BottlerName", "Bottler", "BOTTLER_NM", "ProducerName"],
-        "bottler_address": ["BottlerAddress", "BOTTLER_ADDR", "Address"],
-        "country_of_origin": ["CountryOfOrigin", "Country", "COUNTRY"],
-        "fanciful_name": ["FancifulName", "Fanciful"],
-        "beverage_type": ["BeverageType", "BevType", "PROD_TYPE"],
-    }
-    result: dict[str, str] = {}
-    for canonical, candidates in mapping.items():
-        for c in candidates:
-            if c in raw:
-                result[canonical] = raw[c]
-                break
-        else:
-            # Case-insensitive fallback
-            for k, v in raw.items():
-                if any(c.lower() in k.lower() for c in candidates):
-                    result[canonical] = v
-                    break
-    # Dump any unmapped fields for transparency
-    result["_raw_fields"] = json.dumps(raw)
-    return result
-
-
-def _extract_fields_from_text(text: str) -> dict:
-    """
-    Heuristic extraction for text-based PDFs using keyword anchors.
-    """
-    result: dict[str, str] = {}
-    lines = [l.strip() for l in text.splitlines() if l.strip()]
-
-    patterns = {
-        "brand_name": r"brand\s*name[:\s]+(.+)",
-        "class_type": r"class(?:/type)?(?:\s*designation)?[:\s]+(.+)",
-        "alcohol_content": r"alc(?:ohol)?(?:\s*by\s*vol(?:ume)?)?[:\s%/]+([\d.]+\s*%?\s*(?:alc\.?\s*/?\s*vol\.?)?(?:\s*\(?\d+\s*proof\)?)?)",
-        "net_contents": r"net\s*contents?[:\s]+(.+)",
-        "bottler_name": r"bottl(?:er|ed\s*by)[:\s]+(.+)",
-        "bottler_address": r"address[:\s]+(.+)",
-        "country_of_origin": r"(?:country\s*of\s*)?origin[:\s]+(.+)",
-        "fanciful_name": r"fanciful\s*name[:\s]+(.+)",
-        "beverage_type": r"(?:type\s*of\s*)?(?:beverage|product)[:\s]+(.+)",
-    }
-    for key, pattern in patterns.items():
-        m = re.search(pattern, text, re.IGNORECASE)
-        if m:
-            result[key] = m.group(1).strip()
-
-    result["_raw_text"] = text[:2000]  # First 2000 chars for debugging
-    return result
-
-
 def extract_label_images(pdf_bytes: bytes) -> list[dict]:
     """
     Extract embedded images from a PDF using fitz (PyMuPDF).
@@ -300,53 +197,30 @@ def render_page_as_image(pdf_bytes: bytes, page_num: int = 0) -> dict | None:
 # ── Claude API ────────────────────────────────────────────────────────────────
 
 async def verify_label_with_claude(
-    form_data: dict,
+    pdf_bytes: bytes,
     images: list[dict],
-    pdf_bytes: bytes | None = None,
 ) -> dict:
     """
     POST to /v1/messages with the tool schema from agents.json.
     Forces the report_verification_results tool call — result comes back
     as a parsed dict directly from the tool_use block, no JSON cleanup needed.
 
-    If pdf_bytes is provided (used when the PDF has no live AcroForm fields,
-    i.e. it's flattened or was never fillable), the whole PDF is sent as a
-    document block so Claude reads the form text directly instead of relying
-    on the regex-based form_data extraction, which is less reliable for
-    flattened documents.
+    The whole PDF is always sent as a document block, alongside the extracted
+    label image(s). Claude reads the COLA application data directly from the
+    PDF and reads the label from the image — no local form-field extraction
+    or text parsing happens on the server at all.
     """
     if not ANTHROPIC_API_KEY:
         raise ValueError("ANTHROPIC_API_KEY not configured")
 
-    form_display = {k: v for k, v in form_data.items() if not k.startswith("_")}
-
-    content: list[dict] = []
-
-    if pdf_bytes is not None:
-        content.append({
-            "type": "document",
-            "source": {
-                "type": "base64",
-                "media_type": "application/pdf",
-                "data": base64.standard_b64encode(pdf_bytes).decode(),
-            },
-        })
-        user_text = (
-            "The attached PDF has no live form fields (it is flattened or was "
-            "never a fillable form), so read the COLA application data directly "
-            "from its text/pages instead of relying on any pre-extracted fields. "
-            + (
-                f"Pre-extracted fields (may be incomplete, use only as a hint):\n{json.dumps(form_display, indent=2)}\n\n"
-                if form_display else ""
-            )
-            + "Examine the label image(s) and call report_verification_results with your complete findings."
-        )
-    else:
-        user_text = (
-            "COLA application form data (Form 5100.31):\n"
-            + json.dumps(form_display, indent=2)
-            + "\n\nExamine the label image(s) and call report_verification_results with your complete findings."
-        )
+    content: list[dict] = [{
+        "type": "document",
+        "source": {
+            "type": "base64",
+            "media_type": "application/pdf",
+            "data": base64.standard_b64encode(pdf_bytes).decode(),
+        },
+    }]
 
     for img in images[:3]:
         content.append({
@@ -357,7 +231,16 @@ async def verify_label_with_claude(
                 "data": img["data"],
             },
         })
-    content.append({"type": "text", "text": user_text})
+
+    content.append({
+        "type": "text",
+        "text": (
+            "The attached PDF is a COLA application (TTB Form 5100.31). Read the "
+            "application data directly from the PDF, and examine the label "
+            "image(s) provided. Call report_verification_results with your "
+            "complete findings."
+        ),
+    })
 
     payload = {
         "model": _AGENT_DEF.get("model", "claude-sonnet-4-6"),
@@ -368,11 +251,7 @@ async def verify_label_with_claude(
         "messages": [{"role": "user", "content": content}],
     }
 
-    logger.info(
-        f"Sending to agent {ANTHROPIC_AGENT_ID}: {len(images)} image(s), "
-        f"full PDF forwarded: {pdf_bytes is not None}, "
-        f"form fields: {list(form_display.keys()) or 'none extracted'}"
-    )
+    logger.info(f"Sending to agent {ANTHROPIC_AGENT_ID}: full PDF + {len(images)} image(s)")
 
     async with httpx.AsyncClient(timeout=90.0) as client:
         resp = await client.post(
@@ -420,34 +299,17 @@ async def process_single_pdf(
 ) -> dict:
     """
     Full pipeline for one PDF:
-    1. Extract form fields from PDF text/AcroForm data
-    2. Extract label image(s) from PDF
-    3. Send both to Claude — all reading, OCR, and compliance judgment happens there
+    1. Extract label image(s) from PDF (raw bytes only — no analysis)
+    2. Send the whole PDF + image(s) to Claude — all reading, OCR, form
+       interpretation, and compliance judgment happens there. The server
+       does no text or field extraction of its own.
     """
     job_id = str(uuid.uuid4())[:8]
     logger.info(f"[{job_id}] Processing: {filename}")
 
-    await progress_cb({"stage": "extracting", "file": filename, "pct": 15})
+    await progress_cb({"stage": "imaging", "file": filename, "pct": 30})
 
-    # Check whether this PDF has live form fields at all
-    flattened = is_flattened_or_unfillable(pdf_bytes)
-    if flattened:
-        logger.info(f"[{job_id}] No live AcroForm fields detected — PDF appears flattened or non-fillable; will forward the full PDF to Claude")
-
-    # 1. Extract form data (text only — no interpretation)
-    try:
-        form_data = extract_form_fields(pdf_bytes)
-        logger.debug(
-            f"[{job_id}] Form fields: "
-            + ", ".join(f"{k}={v[:40]!r}" for k, v in form_data.items() if not k.startswith("_") and v)
-        )
-    except Exception as e:
-        logger.error(f"[{job_id}] Form extraction failed: {e}")
-        form_data = {}
-
-    await progress_cb({"stage": "imaging", "file": filename, "pct": 45})
-
-    # 2. Extract label images (raw bytes only — no analysis)
+    # 1. Extract label images (raw bytes only — no analysis)
     try:
         images = extract_label_images(pdf_bytes)
         logger.info(f"[{job_id}] Extracted {len(images)} image(s) from PDF")
@@ -464,17 +326,12 @@ async def process_single_pdf(
 
     await progress_cb({"stage": "verifying", "file": filename, "pct": 60})
 
-    # 3. Claude does all the work: reads the label, OCRs text, checks every field.
-    # If the PDF is flattened/non-fillable, forward the whole document too so
-    # Claude can read the form text directly rather than trust regex extraction.
+    # 2. Claude does all the work: reads the PDF, reads the label, OCRs text,
+    # checks every field. The whole PDF is always forwarded.
     claude_result: dict = {}
-    if images and ANTHROPIC_API_KEY:
+    if ANTHROPIC_API_KEY:
         try:
-            claude_result = await verify_label_with_claude(
-                form_data,
-                images,
-                pdf_bytes=pdf_bytes if flattened else None,
-            )
+            claude_result = await verify_label_with_claude(pdf_bytes, images)
         except Exception as e:
             logger.error(f"[{job_id}] Claude API error: {e}")
             claude_result = {
@@ -484,7 +341,7 @@ async def process_single_pdf(
                 "additional_issues": [],
                 "confidence": "LOW",
             }
-    elif not ANTHROPIC_API_KEY:
+    else:
         logger.warning(f"[{job_id}] ANTHROPIC_API_KEY not set")
         claude_result = {
             "overall_status": "NEEDS_REVIEW",
@@ -493,24 +350,13 @@ async def process_single_pdf(
             "additional_issues": ["Set ANTHROPIC_API_KEY in .env to enable verification"],
             "confidence": "LOW",
         }
-    else:
-        logger.warning(f"[{job_id}] No images found in PDF")
-        claude_result = {
-            "overall_status": "NEEDS_REVIEW",
-            "summary": "No label image found in PDF",
-            "fields": {},
-            "additional_issues": ["No extractable label image found"],
-            "confidence": "LOW",
-        }
 
     await progress_cb({"stage": "complete", "file": filename, "pct": 100})
 
     return {
         "job_id": job_id,
         "filename": filename,
-        "form_data": {k: v for k, v in form_data.items() if not k.startswith("_")},
         "images_found": len(images),
-        "pdf_was_flattened": flattened,
         "result": claude_result,
         "processed_at": datetime.utcnow().isoformat() + "Z",
     }

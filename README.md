@@ -170,4 +170,6 @@ Hosting was probably the biggest hurdle for this because none of the free option
 
 UI is as barebones as it gets. The system did not call for a state machine and the project didn't need one.
 
+At the moment, this only has been tested with 51000.31.
+
 
