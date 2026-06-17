@@ -90,6 +90,7 @@ if FRONTEND_DIR.exists():
     app.mount("/static", StaticFiles(directory=str(FRONTEND_DIR)), name="static")
 
 ANTHROPIC_API_KEY  = os.getenv("ANTHROPIC_API_KEY", "")
+ANTHROPIC_AGENT_ID = os.getenv("AGENT", "")
 ANTHROPIC_ENDPOINT = "https://api.anthropic.com/v1/messages"
 ANTHROPIC_VERSION  = "2023-06-01"
 
@@ -306,7 +307,7 @@ async def verify_label_with_claude(
     }
 
     logger.info(
-        f"Sending to Claude: {len(images)} image(s), "
+        f"Sending to agent {ANTHROPIC_AGENT_ID}: {len(images)} image(s), "
         f"form fields: {list(form_display.keys()) or 'none extracted'}"
     )
 
@@ -460,7 +461,7 @@ async def serve_frontend():
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "api_key_set": bool(ANTHROPIC_API_KEY), "model": _AGENT_DEF.get("model", "not set")}
+    return {"status": "ok", "agent_id": ANTHROPIC_AGENT_ID or "not set", "api_key_set": bool(ANTHROPIC_API_KEY), "model": _AGENT_DEF.get("model", "not set")}
 
 
 @app.post("/verify")
