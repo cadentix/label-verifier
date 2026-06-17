@@ -136,7 +136,7 @@ No ML frameworks, no heavyweight OCR stacks — kept small and auditable.
 
 ---
 
-## Evaluation notes
+## Evaluation notes (assumptions and approach)
 
 > *"If we can't get results back in about 5 seconds, nobody's going to use it."* — Sarah Chen
 
@@ -149,3 +149,25 @@ The UI has exactly two interactions: drop files, click a button. Results are col
 > *"There's nuance. You can't just pattern match everything."* — Dave Morrison
 
 Claude is prompted to apply professional judgment, not regex. The system prompt explicitly lists known nuance cases (case differences, OCR artefacts, punctuation variants) and instructs Claude to treat them as matches.
+
+> *"Think of this as a standalone proof-of-concept that could potentially inform future procurement decisions"* - Marcus Williams
+
+The project's structure might feel flat, and that's because it is. The system prompt suggest that this is supposed to be a quick solution to show what is possible. If more interest is shared with it, more time can be spent on making it more maintable.
+
+> *"We encourage you to review TTB's guidelines at ttb.gov for additional context on label requirements."*
+
+This was done during testing and there was a significant delay in how quickly claude handled the request. the time it took to get a FULL report on the entire PDF was over 20 seconds. Additionally, PII was being sent to claude. This solution only focuses on a small subset things that AI would be good at.
+
+> *"... ther's PII considerations, document retention policies, the usual federal complience stuff. But for the prototype? Just don't do anything crazy."
+
+The PDF actually gets stripped of its contents. This makes flattened PDFs, "print to pdf", unable to reliably extract the text. For these, the system forwards the entire document to Claude which is more expensive and has PII concerns but that can be addressed later after the prototyping phase.
+
+### Trade offs
+
+I did not see the take home assignment until the 14th. It was sent on the 9th with 1 week given to complete. I made plenty of mistakes along the way. I'm hoping my submission is still allowed to be modified the day after the deadline through git commits without flagging anything.
+
+Hosting was probably the biggest hurdle for this because none of the free options worked - they would either spin down from non-use or I didn't have shell access to troubleshoot their build process.
+
+UI is as barebones as it gets. The system did not call for a state machine and the project didn't need one.
+
+

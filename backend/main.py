@@ -85,7 +85,22 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-FRONTEND_DIR = Path(__file__).resolve().parent / "frontend"
+def _find_project_root() -> Path:
+    """
+    Locate the project root regardless of whether main.py sits flat
+    (e.g. /app/main.py in the Docker container) or nested (backend/main.py
+    when run locally). Walks up from this file looking for the agents/
+    and frontend/ directories.
+    """
+    here = Path(__file__).resolve().parent
+    for candidate in (here, here.parent):
+        if (candidate / "agents").exists() and (candidate / "frontend").exists():
+            return candidate
+    # Fall back to the file's own directory if neither match
+    return here
+
+PROJECT_ROOT = _find_project_root()
+FRONTEND_DIR = PROJECT_ROOT / "frontend"
 if FRONTEND_DIR.exists():
     app.mount("/static", StaticFiles(directory=str(FRONTEND_DIR)), name="static")
 
@@ -95,7 +110,7 @@ ANTHROPIC_ENDPOINT = "https://api.anthropic.com/v1/messages"
 ANTHROPIC_VERSION  = "2023-06-01"
 
 # Tool schema — loaded once from agents.json at startup
-_AGENTS_JSON = Path(__file__).resolve().parent / "agents" / "agents.json"
+_AGENTS_JSON = PROJECT_ROOT / "agents" / "agents.json"
 with open(_AGENTS_JSON) as _f:
     _AGENT_DEF = json.load(_f)
 
@@ -116,6 +131,24 @@ VERIFICATION_TOOLS = [
 VERIFICATION_SYSTEM = _AGENT_DEF.get("system", "")
 
 # ── PDF extraction ─────────────────────────────────────────────────────────────
+
+
+def is_flattened_or_unfillable(pdf_bytes: bytes) -> bool:
+    """
+    True if the PDF has no live AcroForm widget fields anywhere.
+    This covers two cases we can't distinguish from structure alone:
+    a form that was flattened (fields baked into static content), or
+    a PDF that was never a fillable form to begin with. Either way,
+    regex text extraction is the only local option — Claude reading
+    the full PDF directly is more reliable than guessing.
+    """
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    for page in doc:
+        if list(page.widgets()):
+            doc.close()
+            return False
+    doc.close()
+    return True
 
 
 def extract_form_fields(pdf_bytes: bytes) -> dict:
@@ -269,23 +302,52 @@ def render_page_as_image(pdf_bytes: bytes, page_num: int = 0) -> dict | None:
 async def verify_label_with_claude(
     form_data: dict,
     images: list[dict],
+    pdf_bytes: bytes | None = None,
 ) -> dict:
     """
     POST to /v1/messages with the tool schema from agents.json.
     Forces the report_verification_results tool call — result comes back
     as a parsed dict directly from the tool_use block, no JSON cleanup needed.
+
+    If pdf_bytes is provided (used when the PDF has no live AcroForm fields,
+    i.e. it's flattened or was never fillable), the whole PDF is sent as a
+    document block so Claude reads the form text directly instead of relying
+    on the regex-based form_data extraction, which is less reliable for
+    flattened documents.
     """
     if not ANTHROPIC_API_KEY:
         raise ValueError("ANTHROPIC_API_KEY not configured")
 
     form_display = {k: v for k, v in form_data.items() if not k.startswith("_")}
-    user_text = (
-        "COLA application form data (Form 5100.31):\n"
-        + json.dumps(form_display, indent=2)
-        + "\n\nExamine the label image(s) and call report_verification_results with your complete findings."
-    )
 
     content: list[dict] = []
+
+    if pdf_bytes is not None:
+        content.append({
+            "type": "document",
+            "source": {
+                "type": "base64",
+                "media_type": "application/pdf",
+                "data": base64.standard_b64encode(pdf_bytes).decode(),
+            },
+        })
+        user_text = (
+            "The attached PDF has no live form fields (it is flattened or was "
+            "never a fillable form), so read the COLA application data directly "
+            "from its text/pages instead of relying on any pre-extracted fields. "
+            + (
+                f"Pre-extracted fields (may be incomplete, use only as a hint):\n{json.dumps(form_display, indent=2)}\n\n"
+                if form_display else ""
+            )
+            + "Examine the label image(s) and call report_verification_results with your complete findings."
+        )
+    else:
+        user_text = (
+            "COLA application form data (Form 5100.31):\n"
+            + json.dumps(form_display, indent=2)
+            + "\n\nExamine the label image(s) and call report_verification_results with your complete findings."
+        )
+
     for img in images[:3]:
         content.append({
             "type": "image",
@@ -308,6 +370,7 @@ async def verify_label_with_claude(
 
     logger.info(
         f"Sending to agent {ANTHROPIC_AGENT_ID}: {len(images)} image(s), "
+        f"full PDF forwarded: {pdf_bytes is not None}, "
         f"form fields: {list(form_display.keys()) or 'none extracted'}"
     )
 
@@ -366,6 +429,11 @@ async def process_single_pdf(
 
     await progress_cb({"stage": "extracting", "file": filename, "pct": 15})
 
+    # Check whether this PDF has live form fields at all
+    flattened = is_flattened_or_unfillable(pdf_bytes)
+    if flattened:
+        logger.info(f"[{job_id}] No live AcroForm fields detected — PDF appears flattened or non-fillable; will forward the full PDF to Claude")
+
     # 1. Extract form data (text only — no interpretation)
     try:
         form_data = extract_form_fields(pdf_bytes)
@@ -396,11 +464,17 @@ async def process_single_pdf(
 
     await progress_cb({"stage": "verifying", "file": filename, "pct": 60})
 
-    # 3. Claude does all the work: reads the label, OCRs text, checks every field
+    # 3. Claude does all the work: reads the label, OCRs text, checks every field.
+    # If the PDF is flattened/non-fillable, forward the whole document too so
+    # Claude can read the form text directly rather than trust regex extraction.
     claude_result: dict = {}
     if images and ANTHROPIC_API_KEY:
         try:
-            claude_result = await verify_label_with_claude(form_data, images)
+            claude_result = await verify_label_with_claude(
+                form_data,
+                images,
+                pdf_bytes=pdf_bytes if flattened else None,
+            )
         except Exception as e:
             logger.error(f"[{job_id}] Claude API error: {e}")
             claude_result = {
@@ -436,6 +510,7 @@ async def process_single_pdf(
         "filename": filename,
         "form_data": {k: v for k, v in form_data.items() if not k.startswith("_")},
         "images_found": len(images),
+        "pdf_was_flattened": flattened,
         "result": claude_result,
         "processed_at": datetime.utcnow().isoformat() + "Z",
     }
