@@ -1,0 +1,115 @@
+{
+  "name": "TTB Label Verifier",
+  "model": "claude-sonnet-4-6",
+  "system": "You are a TTB (Alcohol and Tobacco Tax and Trade Bureau) label compliance specialist. You will be given COLA application form data and one or more label images extracted from a PDF. Examine the label image(s) directly — you are responsible for all OCR and text interpretation. Apply intelligent judgment: case differences like 'STONE'S THROW' vs 'Stone's Throw' are NOT mismatches. OCR artifacts like 'STONF.' should be read as 'STONE' (the period represents the bottom stroke of an E). Minor punctuation differences are not mismatches. The Government Warning header MUST appear as 'GOVERNMENT WARNING:' in all caps with a colon — title case is a regulatory failure per 27 CFR § 16.21. Country of origin is only required for imports; mark it NOT_APPLICABLE for domestic products. When you have completed your analysis, call the report_verification_results tool with your complete findings.",
+  "description": "Verifies TTB COLA alcohol label applications by comparing extracted form data against label artwork using vision. Checks brand name, class/type, ABV, net contents, bottler info, country of origin, and government warning statement.",
+  "tools": [
+    {
+      "type": "custom",
+      "name": "report_verification_results",
+      "description": "Report the complete results of verifying a TTB alcohol beverage label against its COLA application form data. Call this tool once you have examined all provided label images and compared every required field. This is the final output of your analysis — call it exactly once with all findings.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "overall_status": {
+            "type": "string",
+            "enum": ["PASS", "FAIL", "NEEDS_REVIEW"],
+            "description": "PASS if all required fields are present and match. FAIL if any required field is missing or materially wrong. NEEDS_REVIEW if image quality is too poor for a confident determination."
+          },
+          "summary": {
+            "type": "string",
+            "description": "One or two sentence summary of the verification outcome."
+          },
+          "confidence": {
+            "type": "string",
+            "enum": ["HIGH", "MEDIUM", "LOW"],
+            "description": "HIGH if the label is clearly legible. MEDIUM if some text required inference. LOW if the image is blurry, angled, or has significant glare."
+          },
+          "fields": {
+            "type": "object",
+            "description": "Verification result for each required label field.",
+            "properties": {
+              "brand_name": {
+                "type": "object",
+                "properties": {
+                  "status": { "type": "string", "enum": ["PASS", "FAIL", "NOT_FOUND", "NOT_APPLICABLE"] },
+                  "label_value": { "type": "string", "description": "Value as read from the label image." },
+                  "application_value": { "type": "string", "description": "Value declared in the COLA form." },
+                  "finding": { "type": "string", "description": "Brief plain-English explanation." }
+                },
+                "required": ["status", "label_value", "application_value", "finding"]
+              },
+              "class_type": {
+                "type": "object",
+                "properties": {
+                  "status": { "type": "string", "enum": ["PASS", "FAIL", "NOT_FOUND", "NOT_APPLICABLE"] },
+                  "label_value": { "type": "string" },
+                  "application_value": { "type": "string" },
+                  "finding": { "type": "string" }
+                },
+                "required": ["status", "label_value", "application_value", "finding"]
+              },
+              "alcohol_content": {
+                "type": "object",
+                "properties": {
+                  "status": { "type": "string", "enum": ["PASS", "FAIL", "NOT_FOUND", "NOT_APPLICABLE"] },
+                  "label_value": { "type": "string" },
+                  "application_value": { "type": "string" },
+                  "finding": { "type": "string" }
+                },
+                "required": ["status", "label_value", "application_value", "finding"]
+              },
+              "net_contents": {
+                "type": "object",
+                "properties": {
+                  "status": { "type": "string", "enum": ["PASS", "FAIL", "NOT_FOUND", "NOT_APPLICABLE"] },
+                  "label_value": { "type": "string" },
+                  "application_value": { "type": "string" },
+                  "finding": { "type": "string" }
+                },
+                "required": ["status", "label_value", "application_value", "finding"]
+              },
+              "bottler_info": {
+                "type": "object",
+                "properties": {
+                  "status": { "type": "string", "enum": ["PASS", "FAIL", "NOT_FOUND", "NOT_APPLICABLE"] },
+                  "label_value": { "type": "string" },
+                  "application_value": { "type": "string" },
+                  "finding": { "type": "string" }
+                },
+                "required": ["status", "label_value", "application_value", "finding"]
+              },
+              "country_of_origin": {
+                "type": "object",
+                "properties": {
+                  "status": { "type": "string", "enum": ["PASS", "FAIL", "NOT_FOUND", "NOT_APPLICABLE"] },
+                  "label_value": { "type": "string" },
+                  "application_value": { "type": "string" },
+                  "finding": { "type": "string" }
+                },
+                "required": ["status", "label_value", "application_value", "finding"]
+              },
+              "government_warning": {
+                "type": "object",
+                "properties": {
+                  "status": { "type": "string", "enum": ["PASS", "FAIL", "NOT_FOUND", "NOT_APPLICABLE"] },
+                  "label_value": { "type": "string" },
+                  "application_value": { "type": "string" },
+                  "finding": { "type": "string" }
+                },
+                "required": ["status", "label_value", "application_value", "finding"]
+              }
+            },
+            "required": ["brand_name", "class_type", "alcohol_content", "net_contents", "bottler_info", "country_of_origin", "government_warning"]
+          },
+          "additional_issues": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Any other compliance concerns observed beyond the required fields."
+          }
+        },
+        "required": ["overall_status", "summary", "confidence", "fields", "additional_issues"]
+      }
+    }
+  ]
+}
